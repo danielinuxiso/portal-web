@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Portal Sandbox</title>
+<style>
+  :root{
+    --fg:#e8e8ec; --bg:#0b0c10; --orange:#ff8a2b; --blue:#2bb8ff; --bad:#ff3b3b; --good:#36d17a;
+    color-scheme: dark;
+  }
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);font-family:system-ui,-apple-system,sans-serif;color:var(--fg);}
+  canvas{display:block;}
+  #crosshair{position:fixed;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);pointer-events:none;z-index:5;}
+  #crosshair::before,#crosshair::after{content:"";position:absolute;background:#fff;opacity:.85;}
+  #crosshair::before{left:6px;top:0;width:2px;height:14px;}
+  #crosshair::after{top:6px;left:0;width:14px;height:2px;}
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:4;padding:env(safe-area-inset-top,0) 16px 16px;box-sizing:border-box;}
+  #portalStatus{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:10px;align-items:center;}
+  .pdot{width:16px;height:16px;border-radius:50%;border:2px solid #fff6;opacity:.35;}
+  .pdot.on{opacity:1;box-shadow:0 0 10px currentColor;}
+  #pOrange{background:var(--orange);color:var(--orange);}
+  #pBlue{background:var(--blue);color:var(--blue);}
+  #failFlash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:6;transition:opacity .08s;}
+  #help{position:absolute;left:14px;bottom:14px;font-size:12px;line-height:1.6;opacity:.75;text-shadow:0 1px 4px #000;}
+  #help b{color:#fff;}
+  #overlay{position:fixed;inset:0;background:#000c;display:flex;align-items:center;justify-content:center;z-index:10;text-align:center;cursor:pointer;}
+  #overlay .panel{max-width:460px;padding:28px 32px;background:#14161cdd;border:1px solid #ffffff22;border-radius:14px;}
+  #overlay h1{margin:0 0 10px;font-size:22px;}
+  #overlay p{margin:6px 0;font-size:14px;line-height:1.5;opacity:.9;}
+  #overlay b{color:#fff;}
+  #overlay .hint{margin-top:16px;font-size:12px;opacity:.6;}
+  @media (prefers-color-scheme: light){ html,body{background:#0b0c10;} }
+</style>
+</head>
+<body>
+<div id="crosshair"></div>
+<div id="hud">
+  <div id="help"><b>WASD</b> move &nbsp;<b>Space</b> jump &nbsp;<b>Shift</b> sprint<br><b>Left click</b> orange portal &nbsp;<b>Right click</b> blue portal<br><b>E</b> grab / drop cube &nbsp;<b>F</b> throw &nbsp;<b>C</b> respawn cubes &nbsp;<b>R</b> reset portals</div>
+  <div id="portalStatus"><div class="pdot" id="pOrange"></div><div class="pdot" id="pBlue"></div></div>
+</div>
+<div id="failFlash"></div>
+<div id="overlay">
+  <div class="panel">
+    <h1>Portal Sandbox</h1>
+    <p><b>WASD</b> move &nbsp; <b>Space</b> jump &nbsp; <b>Shift</b> sprint</p>
+    <p><b>Left Click</b> orange portal &nbsp; <b>Right Click</b> blue portal &nbsp; <b>R</b> reset</p>
+    <p><b>E</b> grab / drop a cube &nbsp; <b>F</b> throw &nbsp; <b>C</b> respawn cubes</p>
+    <p>A white outline shows where your next portal will land. Try falling into a floor portal, facing two portals at each other, or sending cubes through.</p>
+    <p style="margin-top:12px"><button id="noLock" style="padding:6px 12px;border-radius:6px;border:1px solid #ffffff44;background:#ffffff14;color:#e8e8ec;cursor:pointer;font-size:12px">Mouse lock blocked? Play with arrow-key look instead</button></p>
+    <div class="hint">Click anywhere to start</div>
+  </div>
+</div>
+
+<script src="https://cloudflare.com"></script>
+<script>
+(function(){
+"use strict";
+const $=id=>document.getElementById(id);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function fatal(msg){let e=$('err');if(!e){e=document.createElement('div');e.id='err';e.style.cssText='position:fixed;left:12px;bottom:12px;max-width:80vw;padding:10px 14px;background:#3a0d0d;color:#ffb4b4;border:1px solid #ff3b3b;border-radius:8px;font:12px/1.4 monospace;z-index:99;white-space:pre-wrap';document.body.appendChild(e);}e.textContent=msg;}
+addEventListener('error',e=>fatal('Error: '+e.message));
+if(typeof THREE==='undefined'){fatal('three.js failed to load (CDN blocked or offline).');return;}
+const V3=(x,y,z)=>new THREE.Vector3(x,y,z);
+// ---------- renderer / scene ----------
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x0b0c10);
+scene.fog=new THREE.Fog(0x0b0c10,60,150);
+const camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.05,300);
+const renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xc4ccff,0x30291f,1.05));
+const sun=new THREE.DirectionalLight(0xffffff,0.75); sun.position.set(14,30,8); scene.add(sun);
+const sun2=new THREE.DirectionalLight(0xaaccff,0.35); sun2.position.set(-14,20,-10); scene.add(sun2);
+const rig=new THREE.Object3D(); rig.add(camera); scene.add(rig);
+
+// ---------- map ----------
+// colliders: boxes. Axis-aligned ones block movement sideways; ramps are rotated and only walkable (ground ray).
+const colliders=[], solidMeshes=[], walkMeshes=[];
+const lineMat=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.16});
+const baseTex=(()=>{const c=document.createElement('canvas');c.width=c.height=128;const g=c.getContext('2d');
+  g.fillStyle='#ffffff';g.fillRect(0,0,128,128);g.strokeStyle='#b4bcc9';g.lineWidth=4;g.strokeRect(0,0,128,128);
+  const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.anisotropy=4;return t;})();
+function register(m,w,h,d,block,walk){
+  m.add(new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry),lineMat));
+  scene.add(m); m.updateMatrixWorld(true);
+  const bb=new THREE.Box3().setFromObject(m);
+  const c={mesh:m,half:V3(w/2,h/2,d/2),block,min:bb.min,max:bb.max};
+  colliders.push(c); solidMeshes.push(m); if(walk) walkMeshes.push(m); return c;
+}
+function addBox(w,h,d,x,y,z,color,o){
+  o=o||{};
+  const mat=new THREE.MeshStandardMaterial({color,roughness:.85,metalness:.05});
+  if(o.tile){const t=baseTex.clone();t.needsUpdate=true;t.repeat.set(o.tile[0],o.tile[1]);mat.map=t;}
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat); m.position.set(x,y,z);
+  return register(m,w,h,d,o.block!==false,o.walk!==false);
+}
+// ramp from (bx,bz) heading (dx,dz) for `run`, climbing `rise` from height y0
+function addRamp(bx,bz,dx,dz,run,rise,w,y0,color){
+  const th=Math.atan2(rise,run), len=Math.hypot(run,rise), c=Math.cos(th), s=Math.sin(th);
+  const sl=V3(dx*c,s,dz*c), n=V3(-dx*s,c,-dz*s), x=V3(0,0,0).crossVectors(n,sl);
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,0.4,len),new THREE.MeshStandardMaterial({color,roughness:.85}));
+  m.position.set(bx+dx*run/2,y0+rise/2,bz+dz*run/2).addScaledVector(n,-0.2);
+  m.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x,n,sl));
+  register(m,w,0.4,len,false,true);
+}
+function decal(w,h,x,y,z,ry,color){const m=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshBasicMaterial({color}));m.position.set(x,y,z);m.rotation.y=ry;scene.add(m);}
+const WALL=0x98a1b2, SOLID=0x6b7384, LIGHT=0xb9c1cd;
+addBox(64,1,64,0,-0.5,0,LIGHT,{tile:[32,32]});                                   // floor
+addBox(64,16,1,0,8,32,WALL,{tile:[32,8]}); addBox(64,16,1,0,8,-32,WALL,{tile:[32,8]});
+addBox(1,16,64,32,8,0,WALL,{tile:[32,8]}); addBox(1,16,64,-32,8,0,WALL,{tile:[32,8]});
+const ceiling=addBox(66,1,66,0,16.5,0,0x7b8395,{walk:false,block:false,tile:[33,33]}).mesh;   // placeable, open to portals
+addBox(29,16,1,-17.5,8,0,WALL,{tile:[14,8]}); addBox(29,16,1,17.5,8,0,WALL,{tile:[14,8]});    // divider wall...
+addBox(6,10,1,0,11,0,WALL);                                                                   // ...with a doorway
+// south room: tower + ramp, pillars, freestanding wall, cover
+addBox(10,5,10,14,2.5,-12,SOLID); addRamp(14,-31,0,1,14,5,5,0,SOLID);
+[[-22,-8],[-22,-24],[-10,-16]].forEach(([x,z])=>addBox(3,16,3,x,8,z,SOLID));
+addBox(14,6,1,-14,3,-4,WALL);
+[[-2,-14],[5,-20],[-14,-20],[8,-27],[-6,-28]].forEach(([x,z])=>addBox(2.4,1.2,2.4,x,0.6,z,0x7d8596));
+// north room: three-level ziggurat with ramps, two facing freestanding walls, tall block
+addBox(16,3,16,-18,1.5,18,SOLID); addBox(10,3,9,-18,4.5,21.5,SOLID); addBox(4,3,6,-21,7.5,23,SOLID);
+addRamp(-18,1,0,1,9,3,5,0,SOLID); addRamp(-18,11,0,1,6,3,4,3,SOLID); addRamp(-13.5,23,-1,0,5.5,3,4,6,SOLID);
+addBox(1,9,16,12,4.5,18,WALL); addBox(1,9,16,26,4.5,18,WALL);
+addBox(5,12,5,18,6,6,SOLID);
+[[-4,10],[2,26],[8,12]].forEach(([x,z])=>addBox(2.4,1.2,2.4,x,0.6,z,0x7d8596));
+decal(14,0.5,0,0.7,-31.45,0,0xff8a2b); decal(14,0.5,0,0.7,31.45,Math.PI,0x2bb8ff);
+decal(14,0.5,31.45,0.7,0,-Math.PI/2,0xff8a2b); decal(14,0.5,-31.45,0.7,0,Math.PI/2,0x2bb8ff);
+
+// ---------- input / state ----------
+const EYE=1.7, R=0.4, PW=1.6, PH=2.4, TH=0.1, SPAWN=V3(0,EYE,-26);
+const keys={}; let yaw=0,pitch=0,grounded=false,fallback=false,held=null;
+yaw=Math.PI; const vel=V3(0,0,0);
+rig.position.copy(SPAWN); rig.rotation.y=yaw;
+addEventListener('keydown',e=>{
+  keys[e.code]=true; if(/^(Space|Arrow)/.test(e.code)) e.preventDefault();
+  if(e.repeat||!isActive()) return;
+  if(e.code==='KeyR') resetPortals(); if(e.code==='KeyC') respawnCubes(); if(e.code==='KeyE') grab(); if(e.code==='KeyF') throwCube();
+});
+addEventListener('keyup',e=>{keys[e.code]=false;});
+const locked=()=>document.pointerLockElement===renderer.domElement;
+const isActive=()=>locked()||fallback;
+function syncOverlay(){ $('overlay').style.display=isActive()?'none':'flex'; }
+$('overlay').addEventListener('click',()=>{ try{const p=renderer.domElement.requestPointerLock(); if(p&&p.catch)p.catch(()=>{});}catch(e){} });
+$('noLock').addEventListener('click',e=>{e.stopPropagation();fallback=true;syncOverlay();});
+document.addEventListener('pointerlockchange',syncOverlay);
+addEventListener('mousemove',e=>{ if(!locked())return; yaw-=e.movementX*0.0022; pitch=clamp(pitch-e.movementY*0.0022,-1.5,1.5); });
+document.addEventListener('contextmenu',e=>{ if(isActive()) e.preventDefault(); });
+addEventListener('mousedown',e=>{ if(!isActive())return; if(e.button===0)placePortal('orange'); if(e.button===2)placePortal('blue'); });
+// ---------- portals ----------
+const flip=new THREE.Matrix4().makeRotationY(Math.PI);
+function makePortal(color){
+  // two render targets per portal: draw into one, display the other (this is what lets portals show portals)
+  const mk=()=>new THREE.WebGLRenderTarget(2,2,{minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter});
+  const rts=[mk(),mk()];
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{tex:{value:rts[0].texture},res:{value:new THREE.Vector2(2,2)},on:{value:0},col:{value:new THREE.Color(color)}},
+    vertexShader:'void main(){gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}',
+    // screen-space lookup: the portal is a window onto the render from the linked portal's camera
+    fragmentShader:'uniform sampler2D tex;uniform vec2 res;uniform float on;uniform vec3 col;void main(){gl_FragColor=on>0.5?vec4(texture2D(tex,gl_FragCoord.xy/res).rgb,1.0):vec4(col*0.35,1.0);}'
+  });
+  const g=new THREE.CircleGeometry(1,48); g.scale(PW/2,PH/2,1);
+  const mesh=new THREE.Mesh(g,mat); mesh.visible=false;
+  const fg=new THREE.CircleGeometry(1,48); fg.scale(PW/2+0.08,PH/2+0.08,1);
+  const frame=new THREE.Mesh(fg,new THREE.MeshBasicMaterial({color})); frame.position.z=-0.006; mesh.add(frame);
+  scene.add(mesh);
+  return {mesh,rts,read:0,cam:camera.clone(),active:false,normal:V3(0,0,1),surface:null};
+}
+const portalOrange=makePortal(0xff8a2b), portalBlue=makePortal(0x2bb8ff);
+let linked=false;
+function sizeTargets(){
+  const s=renderer.getDrawingBufferSize(new THREE.Vector2());
+  [portalOrange,portalBlue].forEach(p=>{p.rts.forEach(r=>r.setSize(s.x,s.y));p.mesh.material.uniforms.res.value.copy(s);});
+}
+sizeTargets();
+const ell=(l,k)=>((l.x/(PW/2))**2+(l.y/(PH/2))**2)<k;        // inside the oval opening (portal-local x,y)
+function updatePortalHud(){
+  $('pOrange').classList.toggle('on',portalOrange.active); $('pBlue').classList.toggle('on',portalBlue.active);
+  [portalOrange,portalBlue].forEach(p=>p.mesh.material.uniforms.on.value=linked?1:0);
+}
+function failFlash(){const el=$('failFlash');el.style.opacity=.45;setTimeout(()=>el.style.opacity=0,90);}
+function resetPortals(){
+  [portalOrange,portalBlue].forEach(p=>{p.mesh.visible=false;p.active=false;p.surface=null;});
+  linked=false; updatePortalHud();
+}
+
+// Placement: finds the face under the crosshair, orients the portal (up = world up on walls, player heading on
+// floors/ceilings), clamps it inside the face, rejects faces too small or overlapping the other portal.
+const placeRay=new THREE.Raycaster();
+function computePlacement(which){
+  placeRay.setFromCamera({x:0,y:0},camera);
+  const hit=placeRay.intersectObjects(solidMeshes,false)[0];
+  if(!hit||hit.distance>90) return null;
+  const mesh=hit.object, c=colliders.find(c=>c.mesh===mesh), mw=mesh.matrixWorld;
+  if(!c) return null;
+  const ln=hit.face.normal, ax=Math.abs(ln.x)>.5?0:Math.abs(ln.y)>.5?1:2;
+  const tI=[0,1,2].filter(i=>i!==ax);
+  const axisW=i=>V3(0,0,0).setFromMatrixColumn(mw,i).normalize();
+  const nW=axisW(ax).multiplyScalar(Math.sign(ln.getComponent(ax)));
+  const want=Math.abs(nW.y)>.7?V3(-Math.sin(yaw),0,-Math.cos(yaw)):V3(0,1,0);
+  let up=null,upI=0,bd=-2;
+  tI.forEach(i=>[1,-1].forEach(s=>{const v=axisW(i).multiplyScalar(s),d=v.dot(want);if(d>bd){bd=d;up=v;upI=i;}}));
+  const rI=tI.find(i=>i!==upI), half=[c.half.x,c.half.y,c.half.z];
+  const hx=half[rI]-PW/2, hy=half[upI]-PH/2;
+  if(hx<0||hy<0) return null;                                  // face too small
+  const lp=mesh.worldToLocal(hit.point.clone());
+  lp.setComponent(rI,clamp(lp.getComponent(rI),-hx,hx)); lp.setComponent(upI,clamp(lp.getComponent(upI),-hy,hy));
+  const pos=mesh.localToWorld(lp).addScaledVector(nW,0.02);
+  if(Math.abs(nW.y)<.3&&up.y>.9&&pos.y-PH/2>0&&pos.y-PH/2<1.2) pos.y=PH/2+0.01;   // rest on the floor so it's walkable
+  const other=which==='orange'?portalBlue:which==='blue'?portalOrange:null;
+  if(other&&other.active&&Math.abs(pos.clone().sub(other.mesh.position).dot(other.normal))<0.2){
+    const d=other.mesh.worldToLocal(pos.clone());
+    if(Math.abs(d.x)<PW+0.1&&Math.abs(d.y)<PH+0.1) return null;                    // overlaps the other portal
+  }
+  const right=V3(0,0,0).crossVectors(up,nW);
+  const q=new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(right,up,nW));
+  return {pos,q,nW,mesh};
+}
+function placePortal(which){
+  const r=computePlacement(which); if(!r) return failFlash();
+  const t=which==='orange'?portalOrange:portalBlue;            // re-firing a colour replaces its old portal
+  t.mesh.position.copy(r.pos); t.mesh.quaternion.copy(r.q); t.mesh.updateMatrixWorld(true);
+  t.normal.copy(r.nW); t.surface=r.mesh; t.mesh.visible=true; t.active=true;
+  linked=portalOrange.active&&portalBlue.active; updatePortalHud();
+}
+// faint oval showing where the next portal will land
+const prevPts=[]; for(let i=0;i<48;i++){const a=i/48*Math.PI*2;prevPts.push(V3(Math.cos(a)*PW/2,Math.sin(a)*PH/2,0));}
+const preview=new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(prevPts),new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:.75}));
+preview.visible=false; scene.add(preview);
+function updatePreview(){
+  const r=computePlacement(null);
+  if(r){ preview.position.copy(r.pos).addScaledVector(r.nW,0.01); preview.quaternion.copy(r.q); preview.visible=true; } else preview.visible=false;
+}
+
+// maps a world point/vector from the in-portal side to the out-portal side (180° flip about portal Y)
+function deltaMatrix(inP,outP){
+  const m=new THREE.Matrix4().copy(inP.mesh.matrixWorld).invert();
+  return m.premultiply(flip).premultiply(outP.mesh.matrixWorld);
+}
+
+// ---- portal camera logic: view from the linked portal, rendered to a texture with an oblique near plane ----
+function updatePortalCam(inP,outP){
+  const pc=inP.cam, wm=new THREE.Matrix4().multiplyMatrices(deltaMatrix(inP,outP),camera.matrixWorld);
+  pc.matrixAutoUpdate=false; pc.matrix.copy(wm); pc.matrixWorld.copy(wm); pc.matrixWorldNeedsUpdate=false;
+  pc.matrixWorldInverse.copy(wm).invert();
+  wm.decompose(pc.position,pc.quaternion,pc.scale);
+  pc.projectionMatrix.copy(camera.projectionMatrix);
+  // oblique clip: discard everything between the portal camera and the exit portal's plane
+  const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(outP.normal,outP.mesh.position).applyMatrix4(pc.matrixWorldInverse);
+  const cp=new THREE.Vector4(plane.normal.x,plane.normal.y,plane.normal.z,plane.constant), pm=pc.projectionMatrix, q=new THREE.Vector4();
+  q.x=(Math.sign(cp.x)+pm.elements[8])/pm.elements[0]; q.y=(Math.sign(cp.y)+pm.elements[9])/pm.elements[5];
+  q.z=-1; q.w=(1+pm.elements[10])/pm.elements[14];
+  cp.multiplyScalar(2/cp.dot(q));
+  pm.elements[2]=cp.x; pm.elements[6]=cp.y; pm.elements[10]=cp.z+1; pm.elements[14]=cp.w;
+  pc.projectionMatrixInverse.copy(pm).invert();
+}
+const fr=new THREE.Frustum(), pm4=new THREE.Matrix4(), cpos=V3(0,0,0);
+function renderPortals(){
+  if(!linked) return;
+  rig.updateMatrixWorld(true);                                 // use this frame's camera, not last frame's
+  pm4.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse); fr.setFromProjectionMatrix(pm4);
+  camera.getWorldPosition(cpos);
+  [[portalOrange,portalBlue],[portalBlue,portalOrange]].forEach(([a,b])=>{
+    if(!fr.intersectsObject(a.mesh)||cpos.clone().sub(a.mesh.position).dot(a.normal)<=0) return;   // off-screen / from behind
+    updatePortalCam(a,b);
+    const w=1-a.read;                                          // write the spare target; both portals stay visible, each
+    preview.visible=false;                                     // showing last frame's image, so portals appear inside portals
+    renderer.setRenderTarget(a.rts[w]); renderer.render(scene,a.cam); renderer.setRenderTarget(null);
+    a.read=w; a.mesh.material.uniforms.tex.value=a.rts[w].texture;
+  });
+}
+// Did a body move through a linked portal this step? Uses the segment prev->cur against a plane just in front of
+// the portal (TH) so the swap happens before the camera clips into the surface — the view is seamless.
+function traverse(prev,cur){
+  if(!linked) return null;
+  for(const [a,b] of [[portalOrange,portalBlue],[portalBlue,portalOrange]]){
+    const pl=a.mesh.worldToLocal(prev.clone()), cl=a.mesh.worldToLocal(cur.clone());
+    if(pl.z>TH&&cl.z<=TH){
+      const t=(pl.z-TH)/(pl.z-cl.z);
+      if(ell({x:pl.x+(cl.x-pl.x)*t,y:pl.y+(cl.y-pl.y)*t},1)){
+        const m=deltaMatrix(a,b), q=new THREE.Quaternion(); m.decompose(V3(0,0,0),q,V3(1,1,1));
+        return {m,q,b};
+      }
+    }
+  }
+  return null;
+}
+
+// ---------- collision ----------
+// sideways push-out against block boxes; a portal's own surface is skipped while a body is lined up with its opening
+const overOpening=(surf,p)=>linked&&[portalOrange,portalBlue].some(t=>t.surface===surf&&ell(t.mesh.worldToLocal(p.clone()),1));
+function resolveWalls(p,feet,head,r){
+  const out={x:false,z:false};
+  for(const c of colliders){
+    if(!c.block||feet>=c.max.y-0.3||head<=c.min.y||overOpening(c.mesh,p)) continue;
+    const ct=c.mesh.position, dx=p.x-ct.x, dz=p.z-ct.z, ox=c.half.x+r-Math.abs(dx), oz=c.half.z+r-Math.abs(dz);
+    if(ox>0&&oz>0){ if(ox<oz){p.x+=Math.sign(dx||1)*ox;out.x=true;}else{p.z+=Math.sign(dz||1)*oz;out.z=true;} }
+  }
+  return out;
+}
+// walkable surfaces; a floor/ramp portal lets a body fall through its own opening
+function walkFor(pt){
+  let g=walkMeshes;
+  if(linked) for(const t of [portalOrange,portalBlue]) if(Math.abs(t.normal.y)>0.6&&ell(t.mesh.worldToLocal(pt.clone()),1.15)) g=g.filter(m=>m!==t.surface);
+  return g;
+}
+const rayDown=new THREE.Raycaster(), DOWN=V3(0,-1,0);
+const ceilOpen=p=>linked&&[portalOrange,portalBlue].some(t=>t.surface===ceiling&&ell(t.mesh.worldToLocal(p.clone()),1));
+
+function updatePlayer(dt){
+  if(fallback){ yaw+=((keys.ArrowLeft?1:0)-(keys.ArrowRight?1:0))*2.4*dt; pitch=clamp(pitch+((keys.ArrowUp?1:0)-(keys.ArrowDown?1:0))*1.8*dt,-1.5,1.5); }
+  const fwd=V3(-Math.sin(yaw),0,-Math.cos(yaw)), right=V3(Math.cos(yaw),0,-Math.sin(yaw));
+  const mz=(keys.KeyW?1:0)-(keys.KeyS?1:0), mx=(keys.KeyD?1:0)-(keys.KeyA?1:0), l=Math.hypot(mx,mz)||1;
+  const sp=(keys.ShiftLeft||keys.ShiftRight)?7.2:4.4;
+  const k=grounded?Math.min(1,14*dt):Math.min(1,2.5*dt);       // weak air control so portal momentum carries
+  vel.x+=((fwd.x*mz+right.x*mx)/l*sp-vel.x)*k; vel.z+=((fwd.z*mz+right.z*mx)/l*sp-vel.z)*k;
+  vel.y=Math.max(-30,vel.y-18*dt);
+  if(grounded&&keys.Space){vel.y=6.6;grounded=false;}
+  const prev=rig.position.clone();
+  rig.position.addScaledVector(vel,dt);
+  const pushed=resolveWalls(rig.position,rig.position.y-EYE,rig.position.y+0.15,R);
+  if(pushed.x)vel.x=0; if(pushed.z)vel.z=0;
+  const feet=V3(rig.position.x,rig.position.y-EYE,rig.position.z);
+  rayDown.set(V3(feet.x,feet.y+1,feet.z),DOWN);
+  const h=rayDown.intersectObjects(walkFor(feet),false)[0];
+  if(h&&feet.y<=h.point.y+0.12&&vel.y<=0.5){rig.position.y=h.point.y+EYE;vel.y=0;grounded=true;} else grounded=false;
+  if(rig.position.y>15.8&&!ceilOpen(rig.position)){rig.position.y=15.8;vel.y=Math.min(vel.y,0);}
+  rig.rotation.y=yaw; camera.rotation.x=pitch;
+  const tr=traverse(prev,rig.position);
+  if(tr){
+    const cq=new THREE.Quaternion(); camera.getWorldQuaternion(cq); cq.premultiply(tr.q);
+    const e=new THREE.Euler().setFromQuaternion(cq,'YXZ'); yaw=e.y; pitch=clamp(e.x,-1.5,1.5);
+    rig.position.applyMatrix4(tr.m).addScaledVector(tr.b.normal,tr.b.normal.y>0.7?EYE:0.15);
+    vel.applyQuaternion(tr.q); grounded=false;
+    rig.rotation.y=yaw; camera.rotation.x=pitch;
+  }
+  rig.position.x=clamp(rig.position.x,-31,31); rig.position.z=clamp(rig.position.z,-31,31);
+  if(rig.position.y<-25){rig.position.copy(SPAWN);vel.set(0,0,0);}
+}
+// ---------- cubes (carry them, throw them, send them through portals) ----------
+const cubeGeo=new THREE.BoxGeometry(0.8,0.8,0.8), cubeEdge=new THREE.EdgesGeometry(cubeGeo);
+const cubeMat=new THREE.MeshStandardMaterial({color:0xe08a2e,roughness:.55});
+const cubes=[];
+[[-3,-22],[3,-22],[0,-19],[-6,-24]].forEach(([x,z])=>{
+  const m=new THREE.Mesh(cubeGeo,cubeMat); m.add(new THREE.LineSegments(cubeEdge,new THREE.LineBasicMaterial({color:0x3a1d00})));
+  m.position.set(x,0.4,z); scene.add(m); cubes.push({m,vel:V3(0,0,0),home:V3(x,0.4,z),grounded:false});
+});
+function respawnCubes(){ held=null; cubes.forEach(c=>{c.m.position.copy(c.home);c.vel.set(0,0,0);}); }
+const tA=V3(0,0,0), tB=V3(0,0,0);
+function grab(){
+  if(held){held=null;return;}
+  camera.getWorldPosition(tA); camera.getWorldDirection(tB);
+  const ray=new THREE.Raycaster(tA,tB,0,4.5);
+  const hc=ray.intersectObjects(cubes.map(c=>c.m),false)[0]; if(!hc) return;
+  const s=ray.intersectObjects(solidMeshes,false)[0]; if(s&&s.distance<hc.distance) return;
+  held=cubes.find(c=>c.m===hc.object);
+}
+function throwCube(){
+  if(!held) return;
+  camera.getWorldDirection(tB); held.vel.copy(tB).multiplyScalar(14).add(vel); held=null;
+}
+function updateCube(c,dt){
+  const p=c.m.position;
+  if(held===c){                                                // spring toward a point in front of the crosshair
+    camera.getWorldPosition(tA); camera.getWorldDirection(tB);
+    const hit=new THREE.Raycaster(tA,tB,0,3).intersectObjects(solidMeshes,false)[0];
+    const dist=hit?Math.max(0.9,hit.distance-0.55):2.4;
+    c.vel.copy(tA.clone().addScaledVector(tB,dist).sub(p)).multiplyScalar(12);
+    if(c.vel.length()>25) c.vel.setLength(25);
+    p.addScaledVector(c.vel,dt); c.m.rotation.y=yaw; c.grounded=false; return;
+  }
+  const prev=p.clone();
+  c.vel.y=Math.max(-30,c.vel.y-18*dt);
+  const f=Math.min(1,(c.grounded?6:0.4)*dt); c.vel.x-=c.vel.x*f; c.vel.z-=c.vel.z*f;
+  const dx=p.x-rig.position.x, dz=p.z-rig.position.z, dd=Math.hypot(dx,dz);
+  if(dd<0.9&&dd>0.001&&Math.abs(p.y-(rig.position.y-EYE+0.9))<1.1){ c.vel.x+=dx/dd*40*dt; c.vel.z+=dz/dd*40*dt; }   // walk into it to shove
+  p.addScaledVector(c.vel,dt);
+  const ps=resolveWalls(p,p.y-0.4,p.y+0.4,0.45); if(ps.x)c.vel.x*=-0.2; if(ps.z)c.vel.z*=-0.2;
+  const bottom=V3(p.x,p.y-0.4,p.z);
+  rayDown.set(V3(p.x,p.y+0.8,p.z),DOWN);
+  const h=rayDown.intersectObjects(walkFor(bottom),false)[0];
+  if(h&&bottom.y<=h.point.y+0.1&&c.vel.y<=0.5){p.y=h.point.y+0.4;c.vel.y=0;c.grounded=true;} else c.grounded=false;
+  if(p.y>15.5&&!ceilOpen(p)){p.y=15.5;c.vel.y=Math.min(c.vel.y,0);}
+  const tr=traverse(prev,p);
+  if(tr){ p.applyMatrix4(tr.m).addScaledVector(tr.b.normal,tr.b.normal.y>0.7?0.5:0.15); c.vel.applyQuaternion(tr.q); c.grounded=false; }
+  p.x=clamp(p.x,-31,31); p.z=clamp(p.z,-31,31);
+  if(p.y<-25){p.copy(c.home);c.vel.set(0,0,0);}
+}
+
+// ---------- main loop ----------
+const clock=new THREE.Clock();
+function frame(){
+  requestAnimationFrame(frame);
+  const dt=Math.min(0.033,clock.getDelta());
+  if(isActive()){ updatePlayer(dt); cubes.forEach(c=>updateCube(c,dt)); updatePreview(); } else preview.visible=false;
+  const pv=preview.visible; renderPortals(); preview.visible=pv;
+  renderer.render(scene,camera);
+}
+frame();
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight); sizeTargets();
+});
+})();
+
+</script>
+</body>
+</html>
